@@ -1,0 +1,115 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: linux
+            goarch: '386'
+          - goos: linux
+            goarch: arm
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+          - goos: windows
+            goarch: '386'
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@v5.5.0
+        with:
+          go-version: '1.23'
+
+      - name: Initialize Go module
+        run: |
+          go mod init udp-test
+          go mod tidy
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          cd client
+          OUTPUT="udp-test"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            OUTPUT="udp-test.exe"
+          fi
+          
+          # 为 Alpine 构建静态链接版本
+          if [ -n "${{ matrix.tags }}" ]; then
+            SUFFIX="-alpine"
+            OUTPUT="${OUTPUT}${SUFFIX}"
+            go build -tags "${{ matrix.tags }}" -ldflags "${{ matrix.ldflags }}" -o "../build/${{ matrix.goos }}_${{ matrix.goarch }}${SUFFIX}/$OUTPUT"
+            if [ "${{ matrix.goos }}" != "windows" ]; then
+              chmod +x "../build/${{ matrix.goos }}_${{ matrix.goarch }}${SUFFIX}/$OUTPUT"
+            fi
+          else
+            go build -o "../build/${{ matrix.goos }}_${{ matrix.goarch }}/$OUTPUT"
+            if [ "${{ matrix.goos }}" != "windows" ]; then
+              chmod +x "../build/${{ matrix.goos }}_${{ matrix.goarch }}/$OUTPUT"
+            fi
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.tags && '-alpine' || '' }}
+          path: build
+          if-no-files-found: warn
+          retention-days: 1
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4.3
+        with:
+          pattern: binaries-*
+          path: build
+          merge-multiple: true
+
+      - name: Create Archives
+        run: |
+          cd build
+          for dir in */; do
+            platform=${dir%/}
+            cd "$platform"
+            if [[ -f "udp-test.exe" ]]; then
+              tar czf "../../udp-test-${platform}.tar.gz" "udp-test.exe"
+            else
+              chmod +x udp-test*  # 确保二进制文件有执行权限
+              tar czf "../../udp-test-${platform}.tar.gz" --mode='0755' "udp-test"*  # 使用 --mode 参数保留权限
+            fi
+            cd ..
+          done
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2.2.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          files: |
+            udp-test-*.tar.gz

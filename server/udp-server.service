@@ -1,0 +1,15 @@
+[Unit]
+Description=UDP Server Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/bin/udp-server.py 12345
+Restart=always
+User=nobody
+Group=nogroup
+WorkingDirectory=/usr/bin
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
