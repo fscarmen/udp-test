@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 jobs:
   build:
@@ -12,102 +12,141 @@ jobs:
     strategy:
       matrix:
         include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: linux
-            goarch: '386'
-          - goos: linux
-            goarch: arm
-          - goos: windows
-            goarch: amd64
-          - goos: windows
-            goarch: arm64
-          - goos: windows
-            goarch: '386'
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
+          # Linux
+          - os: linux
+            arch: amd64
+            cc: x86_64-linux-gnu-gcc
+            cc_pkg: gcc-x86-64-linux-gnu
+            ext: ""
+          - os: linux
+            arch: arm64
+            cc: aarch64-linux-gnu-gcc
+            cc_pkg: gcc-aarch64-linux-gnu
+            ext: ""
+          - os: linux
+            arch: "386"
+            cc: i686-linux-gnu-gcc
+            cc_pkg: gcc-i686-linux-gnu
+            ext: ""
+          - os: linux
+            arch: arm
+            cc: arm-linux-gnueabi-gcc
+            cc_pkg: gcc-arm-linux-gnueabi
+            ext: ""
+          # Windows
+          - os: windows
+            arch: amd64
+            cc: x86_64-w64-mingw32-gcc
+            cc_pkg: gcc-mingw-w64-x86-64
+            ext: ".exe"
+          - os: windows
+            arch: "386"
+            cc: i686-w64-mingw32-gcc
+            cc_pkg: gcc-mingw-w64-i686
+            ext: ".exe"
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v6
 
-      - name: Set up Go
-        uses: actions/setup-go@v5.5.0
-        with:
-          go-version: '1.23'
-
-      - name: Initialize Go module
+      - name: Install cross-compilation toolchain
         run: |
-          go mod init udp-test
-          go mod tidy
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ${{ matrix.cc_pkg }}
 
-      - name: Build
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
+      - name: Build udp-test (${{ matrix.os }}-${{ matrix.arch }})
         run: |
-          cd client
-          OUTPUT="udp-test"
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            OUTPUT="udp-test.exe"
+          OUTPUT="udp-test${{ matrix.ext }}"
+          mkdir -p "build/${{ matrix.os }}_${{ matrix.arch }}"
+
+          CFLAGS="-Wall -O2 -s"
+          LIBS=""
+
+          # -lws2_32 must come AFTER the source file (link order)
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            LIBS="-lws2_32"
           fi
-          
-          # 为 Alpine 构建静态链接版本
-          if [ -n "${{ matrix.tags }}" ]; then
-            SUFFIX="-alpine"
-            OUTPUT="${OUTPUT}${SUFFIX}"
-            go build -tags "${{ matrix.tags }}" -ldflags "${{ matrix.ldflags }}" -o "../build/${{ matrix.goos }}_${{ matrix.goarch }}${SUFFIX}/$OUTPUT"
-            if [ "${{ matrix.goos }}" != "windows" ]; then
-              chmod +x "../build/${{ matrix.goos }}_${{ matrix.goarch }}${SUFFIX}/$OUTPUT"
-            fi
-          else
-            go build -o "../build/${{ matrix.goos }}_${{ matrix.goarch }}/$OUTPUT"
-            if [ "${{ matrix.goos }}" != "windows" ]; then
-              chmod +x "../build/${{ matrix.goos }}_${{ matrix.goarch }}/$OUTPUT"
-            fi
-          fi
+
+          ${{ matrix.cc }} $CFLAGS -static \
+            -o "build/${{ matrix.os }}_${{ matrix.arch }}/${OUTPUT}" \
+            src/udp-test.c $LIBS
+
+          file "build/${{ matrix.os }}_${{ matrix.arch }}/${OUTPUT}"
+          ls -lh "build/${{ matrix.os }}_${{ matrix.arch }}/${OUTPUT}"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7
         with:
-          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.tags && '-alpine' || '' }}
-          path: build
+          name: udp-test-${{ matrix.os }}-${{ matrix.arch }}
+          path: build/${{ matrix.os }}_${{ matrix.arch }}
+          if-no-files-found: warn
+          retention-days: 1
+
+  # macOS builds need macOS runners (cross-compiling from Linux is impractical)
+  build-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build udp-test (macOS-${{ matrix.arch }})
+        run: |
+          OUTPUT="udp-test"
+          mkdir -p "build/darwin_${{ matrix.arch }}"
+
+          CFLAGS="-Wall -O2 -s"
+
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            CFLAGS="$CFLAGS -arch x86_64"
+          else
+            CFLAGS="$CFLAGS -arch arm64"
+          fi
+
+          gcc $CFLAGS \
+            -o "build/darwin_${{ matrix.arch }}/${OUTPUT}" \
+            src/udp-test.c
+
+          file "build/darwin_${{ matrix.arch }}/${OUTPUT}"
+          ls -lh "build/darwin_${{ matrix.arch }}/${OUTPUT}"
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: udp-test-darwin-${{ matrix.arch }}
+          path: build/darwin_${{ matrix.arch }}
           if-no-files-found: warn
           retention-days: 1
 
   release:
-    needs: build
+    needs: [build, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4.3
+      - uses: actions/download-artifact@v8
         with:
-          pattern: binaries-*
+          pattern: udp-test-*
           path: build
-          merge-multiple: true
 
       - name: Create Archives
         run: |
           cd build
           for dir in */; do
-            platform=${dir%/}
-            cd "$platform"
-            if [[ -f "udp-test.exe" ]]; then
-              tar czf "../../udp-test-${platform}.tar.gz" "udp-test.exe"
-            else
-              chmod +x udp-test*  # 确保二进制文件有执行权限
-              tar czf "../../udp-test-${platform}.tar.gz" --mode='0755' "udp-test"*  # 使用 --mode 参数保留权限
-            fi
+            artifact_name=${dir%/}
+            # Strip "udp-test-" prefix for platform tag
+            platform=${artifact_name#udp-test-}
+            cd "$artifact_name"
+            chmod +x udp-test* 2>/dev/null || true
+            tar czf "../../udp-test-${platform}.tar.gz" --mode='0755' "udp-test"*
             cd ..
           done
 
+          ls -lh ../udp-test-*.tar.gz
+
       - name: Create Release
-        uses: softprops/action-gh-release@v2.2.2
+        uses: softprops/action-gh-release@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
